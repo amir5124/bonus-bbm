@@ -6,6 +6,7 @@ class OrderController {
     }
 
     // AUTO BONUS: Dipanggil saat order selesai
+    // POST /api/driver/order/complete
     async completeOrder(req, res) {
         try {
             const {
@@ -14,6 +15,7 @@ class OrderController {
                 driver_phone,
                 distance_km,
                 total_price,
+                unique_id,
                 status = 'completed'
             } = req.body;
 
@@ -38,7 +40,8 @@ class OrderController {
                     order_no,
                     distance_km: parseFloat(distance_km),
                     creation_date: new Date().toISOString(),
-                    total_price: parseFloat(total_price) || 0
+                    total_price: parseFloat(total_price) || 0,
+                    unique_id: unique_id || null,
                 });
 
                 console.log(`✅ Auto bonus processed for order ${order_no}:`, bonusResult);
@@ -67,6 +70,7 @@ class OrderController {
     }
 
     // GET driver bonus status
+    // GET /api/driver/order/bonus-status/:username
     async getDriverBonusStatus(req, res) {
         try {
             const { username } = req.params;
@@ -95,6 +99,7 @@ class OrderController {
     }
 
     // Get recent bonuses with pagination
+    // GET /api/driver/order/recent-bonuses?username=xxx&limit=10&offset=0
     async getRecentBonuses(req, res) {
         try {
             const { username, limit = 10, offset = 0 } = req.query;
@@ -106,14 +111,19 @@ class OrderController {
                 });
             }
 
-            const bonuses = await this.bonusModel.getBonusesByDriver(username, {
-                limit: parseInt(limit),
-                offset: parseInt(offset)
+            const result = await this.bonusModel.getBonusesByDriver(username, {
+                limit: parseInt(limit, 10),
+                offset: parseInt(offset, 10)
             });
 
             res.json({
                 success: true,
-                data: bonuses
+                data: result.items,
+                pagination: {
+                    total: result.total,
+                    limit: result.limit,
+                    offset: result.offset,
+                }
             });
 
         } catch (error) {

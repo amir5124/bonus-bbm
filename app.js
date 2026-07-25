@@ -3,6 +3,7 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 
 const bonusRoutes = require('./routes/bonusRoutes');
+const orderRoutes = require('./routes/orderRoutes');
 
 const app = express();
 
@@ -12,6 +13,7 @@ app.use(bodyParser.urlencoded({ extended: true }));
 
 // API Routes
 app.use('/api/driver/bonus', bonusRoutes);
+app.use('/api/driver/order', orderRoutes);
 
 // Error handling
 app.use((err, req, res, next) => {
