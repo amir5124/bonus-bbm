@@ -1,6 +1,6 @@
 const mysql = require('mysql2/promise');
 const axios = require('axios');
-const config = require('../config/database');
+const pool = require('../config/database'); // config/database.js sudah export POOL siap pakai (bukan config mentah)
 
 const CONFIG = {
     jagelApiKey: process.env.JAGEL_APIKEY || 'c6wA9HlUkN2PYEpEOYmDwiehrw7QMIVAvPETMpR2NRN4jjnYPO',
@@ -8,7 +8,7 @@ const CONFIG = {
 
 class BonusBbm {
     constructor() {
-        this.pool = mysql.createPool(config);
+        this.pool = pool; // pakai pool yang sama, jangan createPool ulang
         this.KM_PER_BONUS = 3; // 3 km = 1 bonus
         this.BONUS_PER_BLOCK = 10000; // Rp 10.000 per bonus
     }
