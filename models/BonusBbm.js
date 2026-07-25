@@ -67,8 +67,8 @@ class BonusBbm {
                     `INSERT INTO bonus_bbm 
            (driver_username, driver_phone, order_no, achieved_km, target_km, 
             amount, bonus_type, status, balance_before, balance_after, 
-            expired_at, created_at, source_order)
-           VALUES (?, ?, ?, ?, ?, ?, 'masuk', 'pending', ?, ?, ?, NOW(), ?)`,
+            expired_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'masuk', 'pending', ?, ?, ?, NOW())`,
                     [
                         driver_username,
                         driver_phone,
@@ -78,8 +78,7 @@ class BonusBbm {
                         this.BONUS_PER_BLOCK,
                         balanceBefore,
                         balanceAfter,
-                        expiredAt,
-                        order_no
+                        expiredAt
                     ]
                 );
 
@@ -123,8 +122,8 @@ class BonusBbm {
         const [rows] = await this.pool.execute(
             `SELECT COUNT(*) as count 
        FROM bonus_bbm 
-       WHERE driver_username = ? AND (order_no = ? OR source_order = ?)`,
-            [driverUsername, orderNo, orderNo]
+       WHERE driver_username = ? AND order_no = ?`,
+            [driverUsername, orderNo]
         );
         return rows[0].count > 0;
     }
@@ -197,7 +196,7 @@ class BonusBbm {
         const [bonusRows] = await this.pool.query(
             `SELECT id, driver_username, driver_phone, order_no, achieved_km, target_km,
               amount, bonus_type, status, balance_before, balance_after,
-              expired_at, created_at, claimed_at, source_order
+              expired_at, created_at, claimed_at
        FROM bonus_bbm
        WHERE ${where.join(' AND ')}
        ORDER BY created_at DESC
@@ -227,7 +226,7 @@ class BonusBbm {
         const [rows] = await this.pool.execute(
             `SELECT id, driver_username, driver_phone, order_no, achieved_km, target_km,
               amount, bonus_type, status, balance_before, balance_after,
-              expired_at, created_at, claimed_at, source_order
+              expired_at, created_at, claimed_at
        FROM bonus_bbm WHERE id = ?`,
             [bonusId]
         );
