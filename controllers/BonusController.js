@@ -1,5 +1,10 @@
 const mysql = require('mysql2/promise');
+const axios = require('axios');
 const config = require('../config/database');
+
+const CONFIG = {
+    jagelApiKey: process.env.JAGEL_APIKEY || 'c6wA9HlUkN2PYEpEOYmDwiehrw7QMIVAvPETMpR2NRN4jjnYPO',
+};
 
 class BonusBbm {
     constructor() {
@@ -160,6 +165,212 @@ class BonusBbm {
             pending_count: rows[0]?.pending_count || 0,
             claimed_count: rows[0]?.claimed_count || 0
         };
+    }
+
+    // ============================================================
+    // KLAIM BONUS: adjust saldo penuh (TANPA potongan admin) + notif
+    // ============================================================
+
+    /**
+     * Kirim adjust saldo ke Jagel (penuh, tanpa admin) + kirim notifikasi.
+     * Dipisah agar bisa dipakai ulang oleh claimBonus & claimAllPendingBonus.
+     */
+    async _adjustBalanceAndNotify({ username, amount, note }) {
+        const formattedAmount = amount.toLocaleString('id-ID');
+
+        const adjustPayload = {
+            type: "username",
+            value: username,
+            apikey: CONFIG.jagelApiKey,
+            amount: amount,              // positif = tambah saldo, penuh tanpa potongan admin
+            adjust_balance_admin: 0,
+            note: note,
+        };
+
+        console.log(`📤 [CLAIM-BONUS] Adjust Payload:`, JSON.stringify(adjustPayload));
+
+        const adjustResponse = await axios.post(
+            'https://api.jagel.id/v1/balance/adjust',
+            adjustPayload,
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                },
+                timeout: 30000,
+            }
+        );
+
+        console.log("✅ Adjust Balance Response:", adjustResponse.data);
+
+        if (adjustResponse.data?.success !== true) {
+            throw new Error("Adjust balance gagal: " + JSON.stringify(adjustResponse.data));
+        }
+
+        // Kirim notifikasi (kegagalan notif tidak menggagalkan proses klaim)
+        try {
+            const msgResponse = await axios.post(
+                'https://api.jagel.id/v1/message/send',
+                {
+                    type: "username",
+                    value: username,
+                    apikey: CONFIG.jagelApiKey,
+                    content: note,
+                },
+                {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json',
+                    },
+                    timeout: 30000,
+                }
+            );
+            console.log("✅ Message Sent Response:", msgResponse.data);
+        } catch (msgErr) {
+            console.error("⚠️ Gagal kirim message (Ignored):", msgErr.message);
+        }
+
+        return adjustResponse.data;
+    }
+
+    /**
+     * Klaim satu bonus berdasarkan bonusId.
+     * - Validasi status masih 'pending' & belum expired
+     * - Update status -> 'claimed'
+     * - Adjust saldo Jagel PENUH (tanpa potongan admin)
+     * - Kirim notifikasi ke driver
+     */
+    async claimBonus(bonusId) {
+        const connection = await this.pool.getConnection();
+        await connection.beginTransaction();
+
+        try {
+            // Lock baris bonus supaya tidak diklaim dobel (race condition)
+            const [rows] = await connection.execute(
+                `SELECT * FROM bonus_bbm WHERE id = ? FOR UPDATE`,
+                [bonusId]
+            );
+
+            const bonus = rows[0];
+            if (!bonus) {
+                throw new Error('Bonus tidak ditemukan');
+            }
+            if (bonus.status !== 'pending') {
+                throw new Error(`Bonus sudah berstatus '${bonus.status}', tidak bisa diklaim ulang`);
+            }
+            if (bonus.expired_at && new Date(bonus.expired_at) < new Date()) {
+                await connection.execute(
+                    `UPDATE bonus_bbm SET status = 'expired' WHERE id = ?`,
+                    [bonusId]
+                );
+                await connection.commit();
+                throw new Error('Bonus sudah expired');
+            }
+
+            const amount = bonus.amount; // full amount, tanpa potongan admin
+            const username = bonus.driver_username.trim();
+            const formattedAmount = amount.toLocaleString('id-ID');
+            const note = `Bonus BBM Cair || nominal Rp. ${formattedAmount} || jarak tempuh ${bonus.achieved_km} km || Order ${bonus.order_no}`;
+
+            // Update status jadi claimed dulu (biar row terkunci konsisten)
+            await connection.execute(
+                `UPDATE bonus_bbm SET status = 'claimed', claimed_at = NOW() WHERE id = ?`,
+                [bonusId]
+            );
+
+            await connection.commit();
+
+            // Adjust saldo Jagel (di luar transaksi DB, karena ini call eksternal)
+            const jagelResult = await this._adjustBalanceAndNotify({
+                username,
+                amount,
+                note,
+            });
+
+            return {
+                success: true,
+                bonus_id: bonusId,
+                driver_username: username,
+                amount,
+                note,
+                jagel_response: jagelResult?.data,
+            };
+
+        } catch (error) {
+            // Rollback hanya berlaku kalau belum commit
+            try { await connection.rollback(); } catch (_) {}
+            throw error;
+        } finally {
+            connection.release();
+        }
+    }
+
+    /**
+     * Klaim semua bonus 'pending' milik seorang driver sekaligus,
+     * lalu adjust saldo Jagel dalam SATU kali panggilan (total gabungan)
+     * dan kirim SATU notifikasi ringkasan.
+     */
+    async claimAllPendingBonus(driverUsername) {
+        const connection = await this.pool.getConnection();
+        await connection.beginTransaction();
+
+        try {
+            const [rows] = await connection.execute(
+                `SELECT * FROM bonus_bbm 
+         WHERE driver_username = ? AND status = 'pending'
+         AND (expired_at IS NULL OR expired_at >= NOW())
+         FOR UPDATE`,
+                [driverUsername]
+            );
+
+            if (rows.length === 0) {
+                await connection.commit();
+                return {
+                    success: true,
+                    message: 'Tidak ada bonus pending untuk diklaim',
+                    claimed_count: 0,
+                    total_amount: 0,
+                };
+            }
+
+            const ids = rows.map(r => r.id);
+            const totalAmount = rows.reduce((sum, r) => sum + r.amount, 0);
+            const totalKm = rows.reduce((sum, r) => sum + Number(r.achieved_km), 0);
+
+            await connection.query(
+                `UPDATE bonus_bbm SET status = 'claimed', claimed_at = NOW() WHERE id IN (?)`,
+                [ids]
+            );
+
+            await connection.commit();
+
+            const username = driverUsername.trim();
+            const formattedAmount = totalAmount.toLocaleString('id-ID');
+            const note = `Bonus BBM Cair || total Rp. ${formattedAmount} || ${rows.length} bonus (${totalKm} km) || Klaim Batch`;
+
+            const jagelResult = await this._adjustBalanceAndNotify({
+                username,
+                amount: totalAmount,
+                note,
+            });
+
+            return {
+                success: true,
+                driver_username: username,
+                claimed_count: rows.length,
+                claimed_ids: ids,
+                total_amount: totalAmount,
+                total_km: totalKm,
+                note,
+                jagel_response: jagelResult?.data,
+            };
+
+        } catch (error) {
+            try { await connection.rollback(); } catch (_) {}
+            throw error;
+        } finally {
+            connection.release();
+        }
     }
 }
 
