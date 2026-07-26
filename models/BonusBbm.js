@@ -16,106 +16,117 @@ class BonusBbm {
     // ============================================================
     // AUTO BONUS: Proses bonus saat order selesai
     // ============================================================
-    async processAutoBonus(orderData) {
-        const {
-            driver_username,
-            driver_phone,
-            order_no,
-            distance_km,
-            creation_date,
-            total_price,
-            unique_id // opsional
-        } = orderData;
+   async processAutoBonus(orderData) {
+    const {
+        driver_username,
+        driver_phone,
+        order_no,
+        distance_km,
+        creation_date,
+        total_price,
+        unique_id
+    } = orderData;
 
-        const connection = await this.pool.getConnection();
-        await connection.beginTransaction();
+    console.log(`🔄 Processing bonus for order ${order_no}, distance: ${distance_km}km`);
 
-        try {
-            const today = new Date().toISOString().split('T')[0];
-            const [todayBonuses] = await connection.execute(
-                `SELECT SUM(amount) as total_bonus, SUM(achieved_km) as total_km
-         FROM bonus_bbm 
-         WHERE driver_username = ? AND DATE(created_at) = ? AND status = 'claimed'`,
-                [driver_username, today]
+    const connection = await this.pool.getConnection();
+    await connection.beginTransaction();
+
+    try {
+        const today = new Date().toISOString().split('T')[0];
+        
+        // 🔥 Cek apakah ada bonus hari ini
+        const [todayBonuses] = await connection.execute(
+            `SELECT SUM(amount) as total_bonus, SUM(achieved_km) as total_km
+             FROM bonus_bbm 
+             WHERE driver_username = ? AND DATE(created_at) = ? AND status = 'claimed'`,
+            [driver_username, today]
+        );
+
+        console.log(`📊 Today's bonus: ${JSON.stringify(todayBonuses[0])}`);
+
+        const currentTotalBonus = todayBonuses[0]?.total_bonus || 0;
+        const currentTotalKm = todayBonuses[0]?.total_km || 0;
+
+        const totalKmToday = currentTotalKm + distance_km;
+
+        const bonusBlocks = Math.floor(totalKmToday / this.KM_PER_BONUS);
+        const existingBlocks = Math.floor(currentTotalKm / this.KM_PER_BONUS);
+        const newBlocks = bonusBlocks - existingBlocks;
+
+        console.log(`📊 KM: ${currentTotalKm} -> ${totalKmToday}, Bonus blocks: ${existingBlocks} -> ${bonusBlocks}, New: ${newBlocks}`);
+
+        const createdBonuses = [];
+
+        for (let i = 0; i < newBlocks; i++) {
+            const blockNumber = existingBlocks + i + 1;
+            const achievedKm = Math.min(
+                (blockNumber * this.KM_PER_BONUS) - (currentTotalKm + (i * this.KM_PER_BONUS)),
+                this.KM_PER_BONUS
             );
 
-            const currentTotalBonus = todayBonuses[0]?.total_bonus || 0;
-            const currentTotalKm = todayBonuses[0]?.total_km || 0;
+            const balanceBefore = currentTotalBonus + (i * this.BONUS_PER_BLOCK);
+            const balanceAfter = balanceBefore + this.BONUS_PER_BLOCK;
 
-            const totalKmToday = currentTotalKm + distance_km;
+            const expiredAt = new Date();
+            expiredAt.setDate(expiredAt.getDate() + 7);
 
-            const bonusBlocks = Math.floor(totalKmToday / this.KM_PER_BONUS);
-            const existingBlocks = Math.floor(currentTotalKm / this.KM_PER_BONUS);
-            const newBlocks = bonusBlocks - existingBlocks;
+            const [bonusResult] = await connection.execute(
+                `INSERT INTO bonus_bbm 
+                 (driver_username, driver_phone, order_no, achieved_km, target_km, 
+                  amount, bonus_type, status, balance_before, balance_after, 
+                  expired_at, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, 'masuk', 'pending', ?, ?, ?, NOW())`,
+                [
+                    driver_username,
+                    driver_phone,
+                    order_no,
+                    achievedKm,
+                    this.KM_PER_BONUS,
+                    this.BONUS_PER_BLOCK,
+                    balanceBefore,
+                    balanceAfter,
+                    expiredAt
+                ]
+            );
 
-            const createdBonuses = [];
+            const bonusId = bonusResult.insertId;
 
-            for (let i = 0; i < newBlocks; i++) {
-                const blockNumber = existingBlocks + i + 1;
-                const achievedKm = Math.min(
-                    (blockNumber * this.KM_PER_BONUS) - (currentTotalKm + (i * this.KM_PER_BONUS)),
-                    this.KM_PER_BONUS
-                );
+            await connection.execute(
+                `INSERT INTO bonus_bbm_orders (bonus_id, order_no, distance_km, unique_id, order_date)
+                 VALUES (?, ?, ?, ?, ?)`,
+                [bonusId, order_no, distance_km, unique_id || null, creation_date || null]
+            );
 
-                const balanceBefore = currentTotalBonus + (i * this.BONUS_PER_BLOCK);
-                const balanceAfter = balanceBefore + this.BONUS_PER_BLOCK;
+            console.log(`✅ Bonus created: ID ${bonusId}, amount ${this.BONUS_PER_BLOCK}`);
 
-                const expiredAt = new Date();
-                expiredAt.setDate(expiredAt.getDate() + 7);
-
-                const [bonusResult] = await connection.execute(
-                    `INSERT INTO bonus_bbm 
-           (driver_username, driver_phone, order_no, achieved_km, target_km, 
-            amount, bonus_type, status, balance_before, balance_after, 
-            expired_at, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, 'masuk', 'pending', ?, ?, ?, NOW())`,
-                    [
-                        driver_username,
-                        driver_phone,
-                        order_no,
-                        achievedKm,
-                        this.KM_PER_BONUS,
-                        this.BONUS_PER_BLOCK,
-                        balanceBefore,
-                        balanceAfter,
-                        expiredAt
-                    ]
-                );
-
-                const bonusId = bonusResult.insertId;
-
-                await connection.execute(
-                    `INSERT INTO bonus_bbm_orders (bonus_id, order_no, distance_km, unique_id, order_date)
-           VALUES (?, ?, ?, ?, ?)`,
-                    [bonusId, order_no, distance_km, unique_id || null, creation_date || null]
-                );
-
-                createdBonuses.push({
-                    id: bonusId,
-                    amount: this.BONUS_PER_BLOCK,
-                    achieved_km: achievedKm,
-                    balance_before: balanceBefore,
-                    balance_after: balanceAfter,
-                    expired_at: expiredAt
-                });
-            }
-
-            await connection.commit();
-
-            return {
-                success: true,
-                new_bonuses: createdBonuses,
-                total_bonus_today: currentTotalBonus + (createdBonuses.length * this.BONUS_PER_BLOCK),
-                total_km_today: totalKmToday
-            };
-
-        } catch (error) {
-            await connection.rollback();
-            throw error;
-        } finally {
-            connection.release();
+            createdBonuses.push({
+                id: bonusId,
+                amount: this.BONUS_PER_BLOCK,
+                achieved_km: achievedKm,
+                balance_before: balanceBefore,
+                balance_after: balanceAfter,
+                expired_at: expiredAt
+            });
         }
+
+        await connection.commit();
+
+        return {
+            success: true,
+            new_bonuses: createdBonuses,
+            total_bonus_today: currentTotalBonus + (createdBonuses.length * this.BONUS_PER_BLOCK),
+            total_km_today: totalKmToday
+        };
+
+    } catch (error) {
+        await connection.rollback();
+        console.error('❌ Error processing bonus:', error);
+        throw error;
+    } finally {
+        connection.release();
     }
+}
 
     // Cek apakah order sudah memiliki bonus
     async hasOrderBonus(orderNo, driverUsername) {
