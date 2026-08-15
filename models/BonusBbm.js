@@ -16,9 +16,6 @@ const CONFIG = {
 function toMySQLDateTime(dateInput) {
     if (!dateInput) return null;
 
-    // Kalau sudah string format 'YYYY-MM-DD HH:MM:SS' (tanpa T/Z),
-    // anggap sudah valid untuk MySQL — pakai langsung, jangan diparse
-    // ulang lewat Date() supaya tidak ikut kegeser timezone lokal.
     if (typeof dateInput === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(dateInput)) {
         return dateInput;
     }
@@ -29,6 +26,19 @@ function toMySQLDateTime(dateInput) {
     const pad = (n) => String(n).padStart(2, '0');
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} `
          + `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+// ============================================================
+// HELPER: Paksa nilai jadi NUMBER murni.
+// mysql2 selalu mengembalikan kolom DECIMAL sebagai STRING
+// (mis. "10000.00"). API Jagel /v1/balance/adjust mewajibkan
+// `amount` bertipe numeric — kalau dikirim sebagai string,
+// Jagel menolak dengan "Format parameter yang anda masukkan
+// salah" (400). Rupiah tidak pakai desimal, jadi dibulatkan.
+// ============================================================
+function toNumericAmount(value) {
+    const n = Math.round(Number(value));
+    return Number.isFinite(n) ? n : 0;
 }
 
 class BonusBbm {
@@ -65,8 +75,6 @@ class BonusBbm {
         console.log(`📋 [PROCESS-BONUS] Total Price: Rp${total_price || 0}`);
         console.log(`📋 [PROCESS-BONUS] Unique ID: ${unique_id || 'N/A'}`);
 
-        // ── Normalisasi creation_date SEKALI di sini, dipakai untuk
-        //    semua insert order_date di bawah ──
         const orderDateForDb = toMySQLDateTime(creation_date) || toMySQLDateTime(new Date());
         console.log(`📅 [PROCESS-BONUS] Order date (normalized for DB): ${orderDateForDb}`);
 
@@ -80,7 +88,6 @@ class BonusBbm {
             const today = new Date().toISOString().split('T')[0];
             console.log(`📅 [PROCESS-BONUS] Today: ${today}`);
 
-            // 🔥 Cek total jarak hari ini (pending + claimed, expired dikecualikan)
             console.log('🔍 [PROCESS-BONUS] Fetching today\'s bonus data...');
             const [todayBonuses] = await connection.execute(
                 `SELECT 
@@ -405,19 +412,30 @@ class BonusBbm {
     }
 
     // ============================================================
-    // KLAIM BONUS: adjust saldo penuh + notif
+    // KLAIM BONUS: adjust saldo Jagel penuh + notif
     // ============================================================
+    // FIX: amount dari MySQL selalu string (kolom DECIMAL). Dipaksa
+    // jadi number murni lewat toNumericAmount() sebelum dikirim ke
+    // Jagel, karena API-nya menolak string dengan 400 Bad Request.
     async _adjustBalanceAndNotify({ username, amount, note }) {
         console.log('─'.repeat(40));
         console.log(`📤 [ADJUST-BALANCE] Starting for ${username}`);
-        console.log(`📤 [ADJUST-BALANCE] Amount: Rp${amount}`);
+        console.log(`📤 [ADJUST-BALANCE] Amount (raw): ${amount} (type: ${typeof amount})`);
         console.log(`📤 [ADJUST-BALANCE] Note: ${note}`);
+
+        const numericAmount = toNumericAmount(amount);
+
+        if (numericAmount === 0) {
+            throw new Error(`Amount tidak valid untuk adjust balance: ${amount}`);
+        }
+
+        console.log(`📤 [ADJUST-BALANCE] Amount (numeric, dikirim ke Jagel): ${numericAmount}`);
 
         const adjustPayload = {
             type: "username",
             value: username,
             apikey: CONFIG.jagelApiKey,
-            amount: amount,
+            amount: numericAmount,
             adjust_balance_admin: 0,
             note: note,
         };
@@ -440,7 +458,6 @@ class BonusBbm {
                 throw new Error("Adjust balance gagal: " + JSON.stringify(adjustResponse.data));
             }
 
-            // Kirim notifikasi
             try {
                 const msgResponse = await axios.post(
                     'https://api.jagel.id/v1/message/send',
@@ -511,7 +528,9 @@ class BonusBbm {
                 throw new Error('Bonus sudah expired');
             }
 
-            const amount = bonus.amount;
+            // Normalisasi ke number di awal supaya konsisten dipakai
+            // untuk formatting note maupun untuk dikirim ke Jagel.
+            const amount = toNumericAmount(bonus.amount);
             const username = bonus.driver_username.trim();
             const formattedAmount = amount.toLocaleString('id-ID');
             const note = `Bonus BBM Cair || nominal Rp. ${formattedAmount} || jarak tempuh ${bonus.achieved_km} km || Order ${bonus.order_no}`;
@@ -588,7 +607,9 @@ class BonusBbm {
             });
 
             const ids = rows.map(r => r.id);
-const totalAmount = rows.reduce((sum, r) => sum + Number(r.amount), 0);
+            // FIX: paksa Number sebelum dijumlahkan — r.amount string dari
+            // MySQL, kalau tidak di-Number()-kan akan jadi string concat.
+            const totalAmount = rows.reduce((sum, r) => sum + toNumericAmount(r.amount), 0);
             const totalKm = rows.reduce((sum, r) => sum + Number(r.achieved_km), 0);
 
             await connection.query(
@@ -650,6 +671,51 @@ const totalAmount = rows.reduce((sum, r) => sum + Number(r.amount), 0);
 
         console.log(`✅ [EXPIRE] ${result.affectedRows} bonuses marked as expired`);
         return { expired_count: result.affectedRows };
+    }
+
+    // ============================================================
+    // RETRY: kirim ulang adjust balance ke Jagel untuk bonus yang
+    // statusnya sudah 'claimed' di database tapi gagal/belum sempat
+    // tersinkron ke saldo real Jagel (mis. karena error 400 amount
+    // string sebelum fix ini). TIDAK mengubah status — hanya retry
+    // step pengiriman saldo saja.
+    // ============================================================
+    async retryBalanceSync(bonusId) {
+        console.log('═'.repeat(60));
+        console.log(`🔁 [RETRY-BALANCE] Retrying balance sync for bonus ID: ${bonusId}`);
+        console.log('═'.repeat(60));
+
+        const [rows] = await this.pool.execute(
+            `SELECT * FROM bonus_bbm WHERE id = ?`,
+            [bonusId]
+        );
+
+        const bonus = rows[0];
+        if (!bonus) {
+            throw new Error('Bonus tidak ditemukan');
+        }
+        if (bonus.status !== 'claimed') {
+            throw new Error(`Bonus berstatus '${bonus.status}', retry hanya untuk bonus yang sudah 'claimed'`);
+        }
+
+        const amount = toNumericAmount(bonus.amount);
+        const username = bonus.driver_username.trim();
+        const formattedAmount = amount.toLocaleString('id-ID');
+        const note = `Bonus BBM Cair (retry sync) || nominal Rp. ${formattedAmount} || jarak tempuh ${bonus.achieved_km} km || Order ${bonus.order_no}`;
+
+        const jagelResult = await this._adjustBalanceAndNotify({ username, amount, note });
+
+        console.log(`✅ [RETRY-BALANCE] Berhasil sync ulang untuk bonus ID ${bonusId}`);
+        console.log('═'.repeat(60));
+
+        return {
+            success: true,
+            bonus_id: bonusId,
+            driver_username: username,
+            amount,
+            note,
+            jagel_response: jagelResult?.data,
+        };
     }
 }
 
