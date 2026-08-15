@@ -588,7 +588,7 @@ class BonusBbm {
             });
 
             const ids = rows.map(r => r.id);
-            const totalAmount = rows.reduce((sum, r) => sum + r.amount, 0);
+const totalAmount = rows.reduce((sum, r) => sum + Number(r.amount), 0);
             const totalKm = rows.reduce((sum, r) => sum + Number(r.achieved_km), 0);
 
             await connection.query(
