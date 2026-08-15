@@ -6,6 +6,31 @@ const CONFIG = {
     jagelApiKey: process.env.JAGEL_APIKEY || 'c6wA9HlUkN2PYEpEOYmDwiehrw7QMIVAvPETMpR2NRN4jjnYPO',
 };
 
+// ============================================================
+// HELPER: Konversi Date/ISO-string ke format MySQL DATETIME
+// MySQL (terutama strict mode) menolak format ISO 8601 seperti
+// '2026-08-15T03:07:36.985Z' — harus 'YYYY-MM-DD HH:MM:SS'.
+// Kalau input sudah string dengan format itu (mis. dari Jagel:
+// "2026-08-15 08:52:24"), akan dipakai apa adanya tanpa geser jam.
+// ============================================================
+function toMySQLDateTime(dateInput) {
+    if (!dateInput) return null;
+
+    // Kalau sudah string format 'YYYY-MM-DD HH:MM:SS' (tanpa T/Z),
+    // anggap sudah valid untuk MySQL — pakai langsung, jangan diparse
+    // ulang lewat Date() supaya tidak ikut kegeser timezone lokal.
+    if (typeof dateInput === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(dateInput)) {
+        return dateInput;
+    }
+
+    const d = new Date(dateInput);
+    if (isNaN(d.getTime())) return null;
+
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} `
+         + `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 class BonusBbm {
     constructor() {
         this.pool = pool;
@@ -40,6 +65,11 @@ class BonusBbm {
         console.log(`📋 [PROCESS-BONUS] Total Price: Rp${total_price || 0}`);
         console.log(`📋 [PROCESS-BONUS] Unique ID: ${unique_id || 'N/A'}`);
 
+        // ── Normalisasi creation_date SEKALI di sini, dipakai untuk
+        //    semua insert order_date di bawah ──
+        const orderDateForDb = toMySQLDateTime(creation_date) || toMySQLDateTime(new Date());
+        console.log(`📅 [PROCESS-BONUS] Order date (normalized for DB): ${orderDateForDb}`);
+
         const connection = await this.pool.getConnection();
         console.log('✅ [PROCESS-BONUS] Database connection acquired');
 
@@ -49,19 +79,19 @@ class BonusBbm {
         try {
             const today = new Date().toISOString().split('T')[0];
             console.log(`📅 [PROCESS-BONUS] Today: ${today}`);
-            
-            // 🔥 Cek total jarak hari ini (hanya yang sudah di-claim)
+
+            // 🔥 Cek total jarak hari ini (pending + claimed, expired dikecualikan)
             console.log('🔍 [PROCESS-BONUS] Fetching today\'s bonus data...');
-           const [todayBonuses] = await connection.execute(
-    `SELECT 
-        COALESCE(SUM(amount), 0) as total_bonus, 
-        COALESCE(SUM(achieved_km), 0) as total_km,
-        COUNT(*) as total_count
-     FROM bonus_bbm 
-     WHERE driver_username = ? AND DATE(created_at) = ? 
-       AND status IN ('pending', 'claimed')`,
-    [driver_username, today]
-);
+            const [todayBonuses] = await connection.execute(
+                `SELECT 
+                    COALESCE(SUM(amount), 0) as total_bonus, 
+                    COALESCE(SUM(achieved_km), 0) as total_km,
+                    COUNT(*) as total_count
+                 FROM bonus_bbm 
+                 WHERE driver_username = ? AND DATE(created_at) = ? 
+                   AND status IN ('pending', 'claimed')`,
+                [driver_username, today]
+            );
 
             console.log(`📊 [PROCESS-BONUS] Today's stats:`);
             console.log(`   - Total Bonus: Rp${todayBonuses[0]?.total_bonus || 0}`);
@@ -91,7 +121,7 @@ class BonusBbm {
                 await connection.commit();
                 console.log('✅ [PROCESS-BONUS] Transaction committed (no new bonus)');
                 console.log('═'.repeat(60));
-                
+
                 return {
                     success: true,
                     new_bonuses: [],
@@ -139,7 +169,7 @@ class BonusBbm {
                         this.BONUS_PER_BLOCK,
                         balanceBefore,
                         balanceAfter,
-                        expiredAt
+                        toMySQLDateTime(expiredAt)
                     ]
                 );
 
@@ -149,7 +179,7 @@ class BonusBbm {
                 await connection.execute(
                     `INSERT INTO bonus_bbm_orders (bonus_id, order_no, distance_km, unique_id, order_date)
                      VALUES (?, ?, ?, ?, ?)`,
-                    [bonusId, order_no, distance_km, unique_id || null, creation_date || null]
+                    [bonusId, order_no, distance_km, unique_id || null, orderDateForDb]
                 );
                 console.log(`✅ [PROCESS-BONUS] Order linked to bonus ID: ${bonusId}`);
 
@@ -197,14 +227,14 @@ class BonusBbm {
     // Cek apakah order sudah memiliki bonus
     async hasOrderBonus(orderNo, driverUsername) {
         console.log(`🔍 [HAS-BONUS] Checking order ${orderNo} for driver ${driverUsername}`);
-        
+
         const [rows] = await this.pool.execute(
             `SELECT COUNT(*) as count 
              FROM bonus_bbm 
              WHERE driver_username = ? AND order_no = ?`,
             [driverUsername, orderNo]
         );
-        
+
         const hasBonus = rows[0].count > 0;
         console.log(`🔍 [HAS-BONUS] Result: ${hasBonus} (${rows[0].count} bonuses found)`);
         return hasBonus;
@@ -215,7 +245,7 @@ class BonusBbm {
     // ============================================================
     async getDriverBonusStatus(driverUsername) {
         console.log(`📊 [STATUS] Getting bonus status for ${driverUsername}`);
-        
+
         const today = new Date().toISOString().split('T')[0];
 
         const [rows] = await this.pool.execute(
@@ -308,7 +338,7 @@ class BonusBbm {
 
     async getBonusDetail(bonusId) {
         console.log(`🔍 [DETAIL] Getting bonus detail for ID: ${bonusId}`);
-        
+
         const [rows] = await this.pool.execute(
             `SELECT id, driver_username, driver_phone, order_no, achieved_km, target_km,
                     amount, bonus_type, status, balance_before, balance_after,
@@ -611,13 +641,13 @@ class BonusBbm {
     // ============================================================
     async markExpiredBonuses() {
         console.log(`⏰ [EXPIRE] Marking expired bonuses...`);
-        
+
         const [result] = await this.pool.execute(
             `UPDATE bonus_bbm 
              SET status = 'expired' 
              WHERE status = 'pending' AND expired_at IS NOT NULL AND expired_at < NOW()`
         );
-        
+
         console.log(`✅ [EXPIRE] ${result.affectedRows} bonuses marked as expired`);
         return { expired_count: result.affectedRows };
     }

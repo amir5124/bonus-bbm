@@ -22,7 +22,8 @@ class OrderController {
                 unique_id,
                 status = 'completed',
                 order_type,
-                category
+                category,
+                creation_date // ← BARU: waktu order asli (dari Jagel/UFood), kalau dikirim
             } = req.body;
 
             // Log request body
@@ -33,6 +34,7 @@ class OrderController {
             console.log(`📋 [REQUEST] Order Type: ${order_type || 'N/A'}`);
             console.log(`📋 [REQUEST] Category: ${category || 'N/A'}`);
             console.log(`📋 [REQUEST] Unique ID: ${unique_id || 'N/A'}`);
+            console.log(`📋 [REQUEST] Creation Date (asli): ${creation_date || 'N/A (pakai waktu proses)'}`);
 
             // Validasi
             if (!order_no || !driver_username) {
@@ -62,13 +64,16 @@ class OrderController {
             if (!hasBonus && distance_km > 0 && isFoodOrder) {
                 console.log('✅ [BONUS] All conditions met, processing auto bonus...');
                 console.log('─'.repeat(40));
-                
+
                 bonusResult = await this.bonusModel.processAutoBonus({
                     driver_username,
                     driver_phone: driver_phone || '081257314693',
                     order_no,
                     distance_km: parseFloat(distance_km),
-                    creation_date: new Date().toISOString(),
+                    // Pakai waktu order ASLI kalau dikirim (mis. "2026-08-15 08:52:24"
+                    // dari Jagel/UFood), fallback ke waktu proses sekarang kalau tidak ada.
+                    // Konversi ke format aman-MySQL dilakukan di dalam BonusBbm.processAutoBonus.
+                    creation_date: creation_date || new Date().toISOString(),
                     total_price: parseFloat(total_price) || 0,
                     unique_id: unique_id || null,
                 });
@@ -79,7 +84,7 @@ class OrderController {
                 console.log(`   - New Bonuses: ${bonusResult.new_bonuses?.length || 0}`);
                 console.log(`   - Total Bonus Today: Rp${bonusResult.total_bonus_today || 0}`);
                 console.log(`   - Total KM Today: ${bonusResult.total_km_today || 0}km`);
-                
+
                 if (bonusResult.new_bonuses && bonusResult.new_bonuses.length > 0) {
                     bonusResult.new_bonuses.forEach((b, idx) => {
                         console.log(`   - Bonus #${idx + 1}: ID ${b.id}, Rp${b.amount}, ${b.achieved_km}km`);
