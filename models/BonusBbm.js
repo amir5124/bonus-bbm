@@ -9,7 +9,7 @@ const CONFIG = {
 class BonusBbm {
     constructor() {
         this.pool = pool;
-        this.KM_PER_BONUS = 3;
+        this.KM_PER_BONUS = 10;
         this.BONUS_PER_BLOCK = 10000;
         console.log('🚀 [BONUS] BonusBbm initialized');
         console.log(`📊 [BONUS] KM per bonus: ${this.KM_PER_BONUS}km`);
@@ -52,15 +52,16 @@ class BonusBbm {
             
             // 🔥 Cek total jarak hari ini (hanya yang sudah di-claim)
             console.log('🔍 [PROCESS-BONUS] Fetching today\'s bonus data...');
-            const [todayBonuses] = await connection.execute(
-                `SELECT 
-                    COALESCE(SUM(amount), 0) as total_bonus, 
-                    COALESCE(SUM(achieved_km), 0) as total_km,
-                    COUNT(*) as total_count
-                 FROM bonus_bbm 
-                 WHERE driver_username = ? AND DATE(created_at) = ? AND status = 'claimed'`,
-                [driver_username, today]
-            );
+           const [todayBonuses] = await connection.execute(
+    `SELECT 
+        COALESCE(SUM(amount), 0) as total_bonus, 
+        COALESCE(SUM(achieved_km), 0) as total_km,
+        COUNT(*) as total_count
+     FROM bonus_bbm 
+     WHERE driver_username = ? AND DATE(created_at) = ? 
+       AND status IN ('pending', 'claimed')`,
+    [driver_username, today]
+);
 
             console.log(`📊 [PROCESS-BONUS] Today's stats:`);
             console.log(`   - Total Bonus: Rp${todayBonuses[0]?.total_bonus || 0}`);
