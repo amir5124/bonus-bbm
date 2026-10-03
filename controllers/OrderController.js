@@ -1,5 +1,9 @@
 const BonusBbm = require('../models/BonusBbm');
 
+// Hanya jenis kurir ini yang berhak bonus BBM.
+// 11 = 🚴📦Kurir Food (Motor) - USend Food
+const ELIGIBLE_COURIER_TYPES = [11];
+
 class OrderController {
     constructor() {
         this.bonusModel = new BonusBbm();
@@ -23,7 +27,8 @@ class OrderController {
                 status = 'completed',
                 order_type,
                 category,
-                creation_date // ← BARU: waktu order asli (dari Jagel/UFood), kalau dikirim
+                courrier_type, // ← BARU: jenis kurir dari Jagel (11 = Kurir Food Motor)
+                creation_date // waktu order asli (dari Jagel/UFood), kalau dikirim
             } = req.body;
 
             // Log request body
@@ -33,6 +38,7 @@ class OrderController {
             console.log(`📋 [REQUEST] Total Price: ${total_price}`);
             console.log(`📋 [REQUEST] Order Type: ${order_type || 'N/A'}`);
             console.log(`📋 [REQUEST] Category: ${category || 'N/A'}`);
+            console.log(`📋 [REQUEST] Courier Type: ${courrier_type ?? 'N/A'}`);
             console.log(`📋 [REQUEST] Unique ID: ${unique_id || 'N/A'}`);
             console.log(`📋 [REQUEST] Creation Date (asli): ${creation_date || 'N/A (pakai waktu proses)'}`);
 
@@ -55,13 +61,19 @@ class OrderController {
             console.log(`🔍 [CHECK] Is food order: ${isFoodOrder}`);
             console.log(`🔍 [CHECK] Distance > 0: ${distance_km > 0}`);
 
+            // 🔥 Cek jenis kurir (hanya Kurir Food / courrier_type 11)
+            // Kalau courrier_type tidak dikirim -> Number(undefined) = NaN -> ditolak (strict)
+            const isEligibleCourier = ELIGIBLE_COURIER_TYPES.includes(Number(courrier_type));
+            console.log(`🔍 [CHECK] Eligible courier (type ${courrier_type}): ${isEligibleCourier}`);
+
             let bonusResult = null;
 
             // Proses bonus otomatis hanya jika:
             // 1. Belum ada bonus untuk order ini
             // 2. Distance > 0
             // 3. Order tipe FOOD
-            if (!hasBonus && distance_km > 0 && isFoodOrder) {
+            // 4. Jenis kurir = Kurir Food (courrier_type 11)
+            if (!hasBonus && distance_km > 0 && isFoodOrder && isEligibleCourier) {
                 console.log('✅ [BONUS] All conditions met, processing auto bonus...');
                 console.log('─'.repeat(40));
 
@@ -95,6 +107,7 @@ class OrderController {
                 if (hasBonus) console.log('   - Order already has bonus');
                 if (!(distance_km > 0)) console.log(`   - Distance (${distance_km}km) <= 0`);
                 if (!isFoodOrder) console.log('   - Not a food order');
+                if (!isEligibleCourier) console.log(`   - Courier type ${courrier_type ?? 'N/A'} not eligible (hanya Kurir Food / 11)`);
             }
 
             console.log('═'.repeat(60));
@@ -109,6 +122,7 @@ class OrderController {
                     status,
                     bonus: bonusResult,
                     is_food_order: isFoodOrder,
+                    is_eligible_courier: isEligibleCourier,
                     has_existing_bonus: hasBonus
                 }
             });
