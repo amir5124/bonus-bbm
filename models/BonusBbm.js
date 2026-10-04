@@ -7,6 +7,17 @@ const CONFIG = {
 };
 
 // ============================================================
+// Hanya jenis kurir ini yang berhak bonus BBM.
+// 11 = 🚴📦Kurir Food (Motor) - USend Food
+// ============================================================
+const ELIGIBLE_COURIER_TYPES = [11];
+
+function isEligibleCourierType(courrierType) {
+    // strict: undefined/null/NaN -> false (order tanpa courrier_type ditolak)
+    return ELIGIBLE_COURIER_TYPES.includes(Number(courrierType));
+}
+
+// ============================================================
 // HELPER: Konversi Date/ISO-string ke format MySQL DATETIME
 // MySQL (terutama strict mode) menolak format ISO 8601 seperti
 // '2026-08-15T03:07:36.985Z' — harus 'YYYY-MM-DD HH:MM:SS'.
@@ -49,6 +60,7 @@ class BonusBbm {
         console.log('🚀 [BONUS] BonusBbm initialized');
         console.log(`📊 [BONUS] KM per bonus: ${this.KM_PER_BONUS}km`);
         console.log(`📊 [BONUS] Bonus per block: Rp${this.BONUS_PER_BLOCK}`);
+        console.log(`📊 [BONUS] Eligible courier types: ${ELIGIBLE_COURIER_TYPES.join(', ')}`);
     }
 
     // ============================================================
@@ -62,7 +74,8 @@ class BonusBbm {
             distance_km,
             creation_date,
             total_price,
-            unique_id
+            unique_id,
+            courrier_type
         } = orderData;
 
         console.log('═'.repeat(60));
@@ -74,6 +87,24 @@ class BonusBbm {
         console.log(`📋 [PROCESS-BONUS] Phone: ${driver_phone}`);
         console.log(`📋 [PROCESS-BONUS] Total Price: Rp${total_price || 0}`);
         console.log(`📋 [PROCESS-BONUS] Unique ID: ${unique_id || 'N/A'}`);
+        console.log(`📋 [PROCESS-BONUS] Courier Type: ${courrier_type ?? 'N/A'}`);
+
+        // ── PENJAGA: hanya Kurir Food (courrier_type 11) yang berhak bonus ──
+        // Dicek di awal, sebelum membuka koneksi/transaksi database.
+        // Pakai return (bukan throw) supaya pemanggil tetap menerima
+        // struktur hasil yang sama (new_bonuses: []).
+        if (!isEligibleCourierType(courrier_type)) {
+            console.log(`⏭️ [PROCESS-BONUS] Skip order ${order_no}: courrier_type ${courrier_type ?? 'N/A'} bukan Kurir Food`);
+            console.log('═'.repeat(60));
+            return {
+                success: true,
+                skipped: true,
+                new_bonuses: [],
+                message: 'Jenis kurir tidak berhak bonus',
+                total_km_today: 0,
+                total_bonus_today: 0
+            };
+        }
 
         const orderDateForDb = toMySQLDateTime(creation_date) || toMySQLDateTime(new Date());
         console.log(`📅 [PROCESS-BONUS] Order date (normalized for DB): ${orderDateForDb}`);
@@ -440,7 +471,8 @@ class BonusBbm {
             note: note,
         };
 
-        console.log(`📤 [ADJUST-BALANCE] Payload:`, JSON.stringify(adjustPayload));
+        // apikey tidak ikut dicetak ke log
+        console.log(`📤 [ADJUST-BALANCE] Payload:`, JSON.stringify({ ...adjustPayload, apikey: '***' }));
 
         try {
             const adjustResponse = await axios.post(
