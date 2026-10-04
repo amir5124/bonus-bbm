@@ -88,6 +88,7 @@ class OrderController {
                     creation_date: creation_date || new Date().toISOString(),
                     total_price: parseFloat(total_price) || 0,
                     unique_id: unique_id || null,
+                    courrier_type, // ← diteruskan ke model untuk penjaga jenis kurir
                 });
 
                 console.log('─'.repeat(40));
